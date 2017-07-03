@@ -9,7 +9,6 @@
 #include <vector>
 #include <utility>
 #include <iostream>
-#include <cassert>
 
 #define H 32
 
@@ -34,7 +33,7 @@ struct bucket {
 
 	// Copy the contents of another bucket over while retaining the hop
 	// bitmap.
-	bucket &operator<<=(const bucket &rhs) {
+	bucket &operator=(const bucket &rhs) {
 		key = rhs.key;
 		val = rhs.val;
 		status = rhs.status;
@@ -227,7 +226,6 @@ struct map {
 				open_spot->val = val.second;
 				open_spot->status = Occupied;
 				dst->hop |= (1 << dist) & 0xffffffff;
-				assert(dst->hop <= 0xffffffff);
 				num_elements++;
 				return std::make_pair(iterator(open_spot, this),
 						 true);
@@ -265,7 +263,6 @@ struct map {
 				open_spot->val = val.second;
 				open_spot->status = Occupied;
 				dst->hop |= (1 << dist) & 0xffffffff;
-				assert(dst->hop <= 0xffffffff);
 				num_elements++;
 				return std::make_pair(iterator(open_spot, this), true);
 			}
@@ -291,7 +288,6 @@ struct map {
 		// Our goal here is to swap the base entry with entries
 		// closer to our hop distance until we are within our hop
 		// distance.
-		assert(base < buckets.size());
 		if ((H - 1) <= base) {
 			// No underflow will be immediately encountered.
 		no_underflow:
@@ -310,14 +306,10 @@ struct map {
 				resize();
 				goto insert_after_resize;
 			found_swap:
-				assert(i+j < buckets.size());
-				assert(base < buckets.size());
-				buckets[base] <<= buckets[i + j];
+				buckets[base] = buckets[i + j];
 				buckets[i + j].status = Empty;
 				buckets[i].hop &= ~(1 << j);
 				buckets[i].hop |= (1 << base - i) & 0xffffffff;
-				assert(buckets[i].hop <= 0xffffffff);
-				assert(dst->hop <= 0xffffffff);
 
 				size_t new_base = i + j;
 				size_t delta = base - new_base;
@@ -327,7 +319,6 @@ struct map {
 					curr->val = val.second;
 					curr->status = Occupied;
 					dst->hop |= (1 << (dist - delta)) & 0xffffffff;
-					assert(dst->hop <= 0xffffffff);
 					num_elements++;
 					return std::make_pair(
 						iterator(curr, this),
@@ -350,32 +341,26 @@ struct map {
 			for (i = lower_lim; i < buckets.size(); i++) {
 				for (j = 0; j < buckets.size() - i; j++) {
 					if (buckets[i].hop & (1 << j)) {
-						buckets[base] <<= buckets[i+j];
-						assert(i+j < buckets.size());
+						buckets[base] = buckets[i+j];
 						buckets[i + j].status = Empty;
-						assert(buckets[i].hop <= 0xffffffff);
 						buckets[i].hop &= ~(1 << j);
 						buckets[i].hop |= ((1 << base +
 								    buckets.size() - i)
 								   & 0xffffffff);
 						delta = buckets.size() - i + base - j;
-						assert(buckets[i].hop <= 0xffffffff);
 						new_base = i + j;
 						goto found_swap_underflow;
 					}
 				}
 				for (size_t k = 0; j + k < upper_lim; k++) {
 					if (buckets[i].hop & (1 << j + k)) {
-						buckets[base] <<= buckets[k];
-						assert(k + j < H-1);
+						buckets[base] = buckets[k];
 						buckets[k].status = Empty;
-						assert(buckets[i].hop <= 0xffffffff);
 						buckets[i].hop &= ~(1 << j + k);
 						buckets[i].hop |= ((1 << base +
 								    buckets.size() - i)
 								   & 0xffffffff);
 						delta = base - k;
-						assert(buckets[i].hop <= 0xffffffff);
 						new_base = k;
 						goto found_swap_underflow;
 					}
@@ -386,13 +371,11 @@ struct map {
 				for (j = 0; j < upper_lim; j++) {
 					if (buckets[i].hop & (1 << j)) {
 						// no underflow
-						assert(i+j < buckets.size());
-						buckets[base] <<= buckets[i + j];
+						buckets[base] = buckets[i + j];
 						buckets[i + j].status = Empty;
 						buckets[i].hop &= ~(1 << j);
 						buckets[i].hop |= (1 << base - i) & 0xffffffff;
 						delta = base - (i + j);
-						assert(buckets[i].hop <= 0xffffffff);
 						new_base = i + j;
 						goto found_swap_underflow;
 					}
@@ -427,7 +410,8 @@ struct map {
 	size_t
 	find_linear(Val val) {
 		for (size_t i = 0; i < buckets.size(); i++) {
-			if (buckets[i].val == val && buckets[i].status != Empty) {
+			if (buckets[i].val == val &&
+			    buckets[i].status != Empty) {
 				return i;
 			}
 		}
@@ -472,128 +456,110 @@ private:
 		return nullptr;
 	}
 
-	enum replacement_status {
-		Failed_to_replace = 0,
-		Replaced_no_chain,
-		Replaced_chain,
-	};
-
 	void
 	resize() {
 		auto prev_size = buckets.size();
-		// doubling the vector size isn't an amazing idea but I don't
+		// Doubling the vector size isn't an amazing idea but I don't
 		// want to write out a prime table right now.
 		auto new_size = (prev_size << 1) + 1;
 		buckets.resize(new_size);
-		// Using a work queue like this is due to poor implementation;
-		// I'm collecting all of the items I'm unable to reinsert
-		// quickly and putting them through the slow user-facing insert
-		// function later. That's bad, I'll fix it at some point.
-		std::vector<std::pair<Key, Val>> queue;
+		std::vector<std::pair<Key, Val>> work_queue;
+
 		for (size_t i = 0; i < prev_size; i++) {
 			switch (buckets[i].status) {
-			case Occupied: {
-				auto entry = std::make_pair(buckets[i].key,
-						       buckets[i].val);
-				auto hash = hash_fn(buckets[i].key);
-				auto prev_place = hash % prev_size;
-				auto next_place = hash % new_size;
-				buckets[prev_place].hop &= ~(1 << i-prev_place);
-				if (next_place == i) {
-					buckets[next_place].hop |= 1;
-					continue;
-				}
-				if (next_place < prev_size && next_place > i) {
-					buckets[i].status = ReHashed;
-				}
-				switch (replace(prev_size, new_size,
-						i, queue,
-						next_place, i, 0)) {
-				case Failed_to_replace:
-					queue.push_back(entry);
-				case Replaced_no_chain:
-					buckets[i].status = Empty;
-					break;
-				case Replaced_chain:
-					break;
-				}
-				break;
-			}
-
 			case ReHashed:
 				buckets[i].status = Occupied;
+			case Empty:
+				continue;
+			default:
 				break;
 			}
+			// buckets[i].status == Occupied
+			auto entry = std::make_pair(buckets[i].key,
+						    buckets[i].val);
+			auto hash = hash_fn(buckets[i].key);
+			auto prev_pos = hash % prev_size;
+			auto curr_pos = hash % new_size;
+			buckets[prev_pos].hop &= ~(1 << i-prev_pos);
+			if (next_pos == i) {
+				buckets[curr_pos].hop |= 1;
+				continue;
+			}
+			switch (buckets[curr_pos].status) {
+			case Empty:
+				buckets[curr_pos] = buckets[prev_pos];
+				buckets[curr_pos].hop |= 1;
+				buckets[prev_pos].status = Empty;
+				break;
+
+			case ReHashed:
+				work_queue.push_back(entry);
+				continue;
+
+			default:
+				break;
+			}
+			// buckets[next_pos].status == Occupied
+			if (next_pos < i) {
+				work_queue.push_back(entry);
+				continue;
+			}
+			auto prev_entry = std::make_pair(
+				buckets[curr_pos].key,
+				buckets[curr_pos].val);
+			buckets[curr_pos] = buckets[prev_pos];
+			buckets[curr_pos].hop |= 1;
+			buckets[prev_pos].status = Empty;
+			for (;;) {
+				auto hash = hash_fn(prev_entry.first);
+				auto prev_hash = hash % prev_size;
+				auto curr_hash = hash % next_size;
+				buckets[prev_hash].hop |=
+					~(1 << (curr_pos - prev_hash));
+				if (curr_hash == curr_pos) {
+					work_queue.push_back(prev_entry);
+					break;
+				}
+				if (buckets[curr_hash].status == ReHashed) {
+					// There's a kink in the chain, we can't
+					// move this entry.
+					work_queue.push_back(prev_entry);
+					break;
+				}
+				if (buckets[curr_hash].status == Empty) {
+					buckets[curr_hash].status = ReHashed;
+					buckets[curr_hash].key =
+						prev_entry.first;
+					buckets[curr_hash].val =
+						prev_entry.second;
+					buckets[curr_hash].hop |= 1;
+					break;
+				}
+				// buckets[curr_hash].status == Occupied
+				if (next_hash < i) {
+					work_queue.push_back(prev_entry);
+					break;
+				}
+				// We can rehash this item
+				auto new_entry = std::make_pair(
+					buckets[next_hash].key,
+					buckets[next_hash].value);
+				buckets[next_hash].status = ReHashed;
+				buckets[next_hash].key =
+					prev_entry.first;
+				buckets[next_hash].val =
+					prev_entry.second;
+				buckets[next_hash].hop |= 1;
+				prev_entry = new_entry;
+				prev_pos = next_hash;
+			}
 		}
-		// Optimization: insert checks if entry already exists, this is
-		// slow.
+
 		for (auto entry : queue) {
 			insert(entry);
 		}
 	}
 
-	enum replacement_status
-	replace(const size_t prev_size, const size_t new_size,
-		const size_t initial, std::vector<std::pair<Key, Val>> &queue,
-		size_t place, size_t replacement, size_t depth) {
-		if (place == initial) {
-			// This chain can be collapsed.
-			buckets[initial] <<= buckets[replacement];
-			buckets[initial].hop |= 1;
-			return Replaced_chain;
-		}
-		switch (buckets[place].status) {
-		case Empty:
-			buckets[place] <<= buckets[replacement];
-			buckets[place].hop |= 1;
-			return Replaced_no_chain;
-		case ReHashed:
-			return Failed_to_replace;
-		}
-		// The bucket is occupied.
-		if (place < initial || place >= prev_size) {
-			// places before our current marker or
-			// past prev_size have already been
-			// moved. We should avoid touching them.
-			return Failed_to_replace;
-		}
-		// Naively attempt to move next to an unaccopied
-		// space.
-		auto entry = std::make_pair(buckets[place].key,
-					    buckets[place].val);
-		auto hash = hash_fn(buckets[place].key);
-		auto prev_place = hash % prev_size;
-		auto next_place = hash % new_size;
-		if (next_place < prev_size && next_place > initial) {
-			// Mark this entry as rehashed so that no future
-			// replacements will displace it.
-			buckets[place].status = ReHashed;
-		}
-		if (next_place == place) {
-			return Failed_to_replace;
-		}
-		// We should add a heuristic check if next_place
-		// is within the hop distance of i and add
-		// it there, completing  a chain.
-		auto repl = buckets[replacement];
-		repl.hop = buckets[place].hop;
-		auto status = (depth < 1000)
-			? replace(prev_size, new_size,
-				  initial, queue,
-				  next_place, place, depth + 1)
-			: Failed_to_replace;
-		if (status == Failed_to_replace) {
-			// If we could find a spot, add this
-			// entry to the queue so we can add
-			// it later.
-			queue.push_back(entry);
-			status = Replaced_no_chain;
-		}
-		buckets[place] = repl;
-		buckets[prev_place].hop &= ~(1 << place-prev_place);
-		buckets[place].hop |= 1;
-		return status;
-	}
 };
 
 #endif
